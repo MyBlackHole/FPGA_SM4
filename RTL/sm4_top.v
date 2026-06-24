@@ -81,7 +81,7 @@ module sm4_top(
     wire    [31 : 0] rk_30              ;
     wire    [31 : 0] rk_31              ;
     
-    sm4_encdec u_encdec (
+    sm4_encdec_serial u_encdec (
         .clk                    (clk                 ),
         .reset_n                (reset_n             ),
         .sm4_enable_in          (sm4_enable_in       ),

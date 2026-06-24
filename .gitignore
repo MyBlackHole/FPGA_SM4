@@ -1,0 +1,10 @@
+# Build outputs
+*.json
+*.fs
+*.log
+abc.history
+build/
+
+# OS files
+.DS_Store
+Thumbs.db

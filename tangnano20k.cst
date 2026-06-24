@@ -1,0 +1,33 @@
+// Tang Nano 20K (GW2AR-LV18QN88C8/I7) Pin Constraints
+// Reference: Sipeed Tang Nano 20K schematic v1.3
+
+// Clock: 27MHz onboard crystal
+IO_LOC  "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33;
+
+// S2 Button - Reset (active low, external pull-up)
+IO_LOC  "rst_n" 87;   // PIN87_MODE1_KEY2
+IO_PORT "rst_n" IO_TYPE=LVCMOS33;
+
+// S1 Button - Start (active low, external pull-up)
+IO_LOC  "btn_s1" 88;  // PIN88_MODE0_KEY1
+IO_PORT "btn_s1" IO_TYPE=LVCMOS33;
+
+// LEDs (active low)
+IO_LOC  "led[0]" 15;  // PIN15_SYS_LED0
+IO_PORT "led[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC  "led[1]" 16;  // PIN16_SYS_LED1
+IO_PORT "led[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC  "led[2]" 17;  // PIN17_SYS_LED2
+IO_PORT "led[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC  "led[3]" 18;  // PIN18_SYS_LED3
+IO_PORT "led[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC  "led[4]" 19;  // PIN19_SYS_LED4
+IO_PORT "led[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC  "led[5]" 20;  // PIN20_SYS_LED5
+IO_PORT "led[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
