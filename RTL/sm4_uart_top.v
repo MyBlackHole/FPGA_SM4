@@ -15,6 +15,25 @@
 //     3. Waits for completion
 //     4. Transmits 16 result bytes via UART TX
 ////////////////////////////////////////////////////////////////////////////////
+// 备注：SM4 UART 通信顶层模块
+// 备注：
+// 备注：通过 UART (115200 8N1) 与 PC 通信，实现 SM4 加密/解密功能
+// 备注：
+// 备注：UART 命令协议:
+// 备注：  'K' + 16 字节密钥    → 设置密钥（仅存储，不展开）
+// 备注：  'E' + 16 字节明文    → 加密，返回 16 字节密文
+// 备注：  'D' + 16 字节密文    → 解密，返回 16 字节明文
+// 备注：  'P'                 → Ping，返回 'O'
+// 备注：
+// 备注：处理流程 (以加密为例):
+// 备注：  PC ──'E'──▶ UART RX ──▶ 接收命令
+// 备注：  PC ──16字节明文──▶ UART RX ──▶ 存入 result_buf
+// 备注：  ▶ 密钥扩展(key_expansion) ◀── 使用已存储的用户密钥
+// 备注：  ▶ 等待密钥扩展完成
+// 备注：  ▶ 送入加密引擎(sm4_encdec_serial)
+// 备注：  ▶ 等待加密完成
+// 备注：  ▶ 捕获结果到 result_buf
+// 备注：  ▶ UART TX ──16字节密文──▶ PC
 module sm4_uart_top #(
     parameter CLK_FREQ  = 27_000_000,
     parameter BAUD_RATE = 115200
@@ -28,6 +47,7 @@ module sm4_uart_top #(
     output wire [127:0] sm4_result_out,
     output wire         sm4_ready_out
 );
+    // 备注：UART 收发器实例 — 通过 115200 8N1 与 PC 串口通信
     // ── UART instances ──────────────────────────────────────────────────────
     wire [7:0] rx_data;
     wire       rx_received;
@@ -35,14 +55,17 @@ module sm4_uart_top #(
     wire [7:0] tx_data;
     wire       tx_busy;
 
+    // 备注：UART 接收器 — 将串行 rx 信号转换为 8 位并行数据
     uart_rx #(.CLK_FREQ(CLK_FREQ), .BAUD_RATE(BAUD_RATE))
     u_rx (.clk(clk), .reset_n(reset_n), .rx(rx),
            .data_out(rx_data), .received(rx_received));
 
+    // 备注：UART 发送器 — 将 8 位并行数据转换为串行 tx 信号发送给 PC
     uart_tx #(.CLK_FREQ(CLK_FREQ), .BAUD_RATE(BAUD_RATE))
     u_tx (.clk(clk), .reset_n(reset_n), .send(tx_send),
            .data_in(tx_data), .tx(tx), .busy(tx_busy));
 
+    // 备注：SM4 核心实例 — 包含密钥扩展、加密/解密引擎 (sm4_encdec_serial)
     // ── SM4 core (via sm4_top) ──────────────────────────────────────────────
     wire [127:0] user_key;
     wire [127:0] data_in;
@@ -56,6 +79,9 @@ module sm4_uart_top #(
     wire         key_exp_ready_out;
     wire         ready_out;
 
+    // 备注：SM4 顶层模块实例
+    // 备注：data_in / result 均为 128 位宽，内部包含流水线架构的加密/解密单元
+    // 备注：key_cached_in 指示密钥是否已缓存，避免重复扩展
     sm4_top u_sm4 (
         .clk                (clk),
         .reset_n            (reset_n),
@@ -80,6 +106,10 @@ module sm4_uart_top #(
 
     reg [4:0] tx_done_count;
 
+    // 备注：密钥缓存优化 — 避免重复扩展相同密钥
+    // 备注：key_cached=1 时，对 E/D 命令跳过 KEY_EXPAND→WAIT_KEY 状态
+    // 备注：key_expansion 模块保持轮密钥寄存器，故只需让 sm4_encdec_serial
+    // 备注：立即看到 key_exp_ready=1 即可，无需重新计算
     // ── Key expansion cache ────────────────────────────────────────────────
     // When key_cached=1, skip KEY_EXPAND→WAIT_KEY on E/D commands.
     // The key_expansion module retains its round key registers, so we
@@ -87,6 +117,18 @@ module sm4_uart_top #(
     reg key_cached;
     wire key_ready = key_exp_ready_out || key_cached;
 
+    // 备注：UART 协议状态机 — 控制接收 UART 命令、密钥扩展、加密/解密、结果发送
+    // 备注：
+    // 备注：  IDLE       → 等待 UART 命令字节 ('K'/'E'/'D'/'P')
+    // 备注：  RX_KEY     → 接收 16 字节密钥并存入 key_buf
+    // 备注：  RX_DATA    → 接收 16 字节待处理数据并存入 result_buf
+    // 备注：  KEY_EXPAND → 拉高 enable_key_exp 信号启动密钥扩展
+    // 备注：  WAIT_KEY   → 等待密钥扩展完成 (key_exp_ready_out)
+    // 备注：  DO_START   → 发送 valid_in 脉冲启动加密/解密
+    // 备注：  WAIT_DONE  → 等待加密/解密完成 (ready_out)
+    // 备注：  CAPTURE    → 从 result 捕获 16 字节结果到 result_buf 并启动 UART 发送
+    // 备注：  TX_RESULT  → 通过 UART 逐字节发送 16 字节结果
+    // 备注：  TX_PONG    → 收到 'P' 后回复 'O'
     // ── FSM ─────────────────────────────────────────────────────────────────
     localparam IDLE       = 5'd0;
     localparam RX_KEY     = 5'd1;
@@ -192,6 +234,7 @@ module sm4_uart_top #(
             valid_in          <= 1'b0;
 
             case (state)
+                // 备注：IDLE — 等待 UART 命令，识别 'K'(设置密钥) / 'E'(加密) / 'D'(解密) / 'P'(Ping)
                 // ═════════════════════════════════════════════════════════
                 IDLE: begin
                     sm4_enable_in     <= 1'b0;
@@ -219,6 +262,7 @@ module sm4_uart_top #(
                     end
                 end
 
+                // 备注：RX_KEY — 逐字节接收 16 字节密钥存入 key_buf，收满返回 IDLE
                 // ═════════════════════════════════════════════════════════
                 RX_KEY: begin
                     if (rx_received) begin
@@ -230,6 +274,8 @@ module sm4_uart_top #(
                     end
                 end
 
+                // 备注：RX_DATA — 逐字节接收 16 字节数据到 result_buf
+                // 备注：收满后根据 key_cached 决定直接启动加密/解密或先执行密钥扩展
                 // ═════════════════════════════════════════════════════════
                 RX_DATA: begin
                     if (rx_received) begin
@@ -257,6 +303,7 @@ module sm4_uart_top #(
                     end
                 end
 
+                // 备注：KEY_EXPAND — 拉高 enable_key_exp 信号，启动密钥扩展
                 // ═════════════════════════════════════════════════════════
                 KEY_EXPAND: begin
                     $display("[%0t] KEY_EXPAND", $time);
@@ -266,6 +313,7 @@ module sm4_uart_top #(
                     state             <= WAIT_KEY;
                 end
 
+                // 备注：WAIT_KEY — 等待密钥扩展完成，完成后标记 key_cached 并发送 valid_in 脉冲
                 // ═════════════════════════════════════════════════════════
                 WAIT_KEY: begin
                     sm4_enable_in     <= 1'b1;
@@ -280,6 +328,7 @@ module sm4_uart_top #(
                     end
                 end
 
+                // 备注：DO_START — 发送 valid_in 脉冲启动加密/解密引擎，然后进入 WAIT_DONE
                 // ═════════════════════════════════════════════════════════
                 DO_START: begin
                     // valid_in was pulsed for one cycle.
@@ -292,6 +341,7 @@ module sm4_uart_top #(
                     state <= WAIT_DONE;
                 end
 
+                // 备注：WAIT_DONE — 等待加密/解密完成 (ready_out)，完成后进入 CAPTURE
                 // ═════════════════════════════════════════════════════════
                 WAIT_DONE: begin
                     sm4_enable_in     <= 1'b1;
@@ -304,6 +354,8 @@ module sm4_uart_top #(
                     end
                 end
 
+                // 备注：CAPTURE — 从 result 总线捕获 16 字节结果到 result_buf
+                // 备注：同时发送第一个字节的 send_pulse 启动 UART TX 发送
                 // ═════════════════════════════════════════════════════════
                 CAPTURE: begin
                     $display("[%0t] CAPTURE: result=%032h, tx_busy=%b", $time, result, tx_busy);
@@ -336,6 +388,8 @@ module sm4_uart_top #(
                     state         <= TX_RESULT;
                 end
 
+                // 备注：TX_RESULT — 通过 UART 逐字节发送 16 字节结果
+                // 备注：利用 tx_busy_falling 边沿检测每个字节发送完成，依次推送下一字节
                 // ═════════════════════════════════════════════════════════
                 TX_RESULT: begin
                     // Byte 0 was queued by CAPTURE's send_pulse.
@@ -359,6 +413,7 @@ module sm4_uart_top #(
                     end
                 end
 
+                // 备注：TX_PONG — Ping 响应状态，等待 'O' 发送完毕后返回 IDLE
                 // ═════════════════════════════════════════════════════════
                 TX_PONG: begin
                     if (tx_busy_falling) begin
