@@ -18,6 +18,24 @@
 // Additional Comments:
 // 
 //////////////////////////////////////////////////////////////////////////////////
+// 备注：SM4 加密/解密引擎 — 32 级全流水线架构
+// 备注：
+// 备注：架构特点：
+// 备注：  ┌──────┐   ┌──────┐        ┌──────┐
+// 备注：  │ 第0轮 │→→→│ 第1轮 │→→→...→│ 第31轮│
+// 备注：  └──────┘   └──────┘        └──────┘
+// 备注：  组合逻辑     寄存器         组合逻辑
+// 备注：
+// 备注：每一轮都是组合逻辑(one_round_for_encdec)，轮间有寄存器流水线
+// 备注：输入 valid_in 有效后，经过 32 个时钟周期输出结果
+// 备注：流水线填满后可每个时钟处理一个分组（吞吐率 1 分组/时钟）
+// 备注：
+// 备注：FSM 状态:
+// 备注：  IDLE → WAITING_FOR_KEY → ENCRYPTION
+// 备注：  key_exp_ready_in 有效后才开始加密运算
+// 备注：
+// 备注：输出反序: SM4 第 32 轮输出 (X32_0,X32_1,X32_2,X32_3)
+// 备注：  但密文定义为 (X32_3,X32_2,X32_1,X32_0) — 反序变换 R
 module sm4_encdec(
     clk                 ,
     reset_n             ,
@@ -176,16 +194,25 @@ module sm4_encdec(
     reg     [1   : 0] current           ;
     reg     [1   : 0] next              ;
     
+    // 备注：FSM 状态定义 — 三段式状态机
+    // 备注：  IDLE           空闲，等待启动信号
+    // 备注：  WAITING_FOR_KEY 等待密钥扩展完成
+    // 备注：  ENCRYPTION      正常加密/解密运行
     `define IDLE                2'b00
     `define WAITING_FOR_KEY     2'b01
     `define ENCRYPTION          2'b10
     
+    // 备注：状态寄存器 current —— 时序逻辑更新
     always@(posedge clk or negedge reset_n)
     if(!reset_n)
         current <= `IDLE;
     else if(sm4_enable_in)
         current <= next;
-        
+
+    // 备注：状态转移逻辑 —— 组合逻辑
+    // 备注：  IDLE → WAITING_FOR_KEY: encdec_enable_in 有效
+    // 备注：  WAITING_FOR_KEY → ENCRYPTION: key_exp_ready_in 有效
+    // 备注：  ENCRYPTION → IDLE: encdec_enable_in 或 sm4_enable_in 拉低
     always@(*)        
         begin
             next = `IDLE;
@@ -210,6 +237,11 @@ module sm4_encdec(
             endcase
         end
                 
+    // 备注：reg_tmp — 32-bit 移位寄存器，追踪流水线进度
+    // 备注：  每个时钟左移 1 位，低位补 0
+    // 备注：  valid_in 有效时从 LSB 注入 1，否则注入 0
+    // 备注：  经过 32 个时钟后 bit31 变为 1，表示 32 轮计算完毕
+    // 备注：  类似一个"温度计"：指示数据已在流水线中走了多远
     always@(posedge clk or negedge reset_n)
     if(!reset_n)
         reg_tmp <= 32'b0;
@@ -221,6 +253,12 @@ module sm4_encdec(
 
     assign ready_out = reg_tmp[31];
     
+    // 备注：32 级流水线 — 每一级实例化一个 one_round_for_encdec
+    // 备注：  第 0 级: 输入直接来自 data_in（明文/密文）
+    // 备注：  第 1-31 级: 输入来自上一级的流水线寄存器 reg_result_xx
+    // 备注：  每级的轮密钥 rk_xx_in 不同（由密钥扩展模块预先计算）
+    // 备注：  数据流: data_in → u_00 → reg_00 → u_01 → reg_01 → ... → u_31 → result_31
+    // 备注：  第一级输入 raw 数据，之后每级从寄存器取上一轮结果
     one_round_for_encdec u_00 ( .data_in(data_in      ), .round_key_in(rk_00_in), .result_out(result_00) );
     one_round_for_encdec u_01 ( .data_in(reg_result_00), .round_key_in(rk_01_in), .result_out(result_01) );
     one_round_for_encdec u_02 ( .data_in(reg_result_01), .round_key_in(rk_02_in), .result_out(result_02) );
@@ -254,9 +292,19 @@ module sm4_encdec(
     one_round_for_encdec u_30 ( .data_in(reg_result_29), .round_key_in(rk_30_in), .result_out(result_30) );
     one_round_for_encdec u_31 ( .data_in(reg_result_30), .round_key_in(rk_31_in), .result_out(result_31) );
     
+    // 备注：输出反序变换 R
+    // 备注：  SM4 算法第 32 轮输出为 (X32_0, X32_1, X32_2, X32_3)
+    // 备注：  密文定义为 (X32_3, X32_2, X32_1, X32_0) — 即反序变换 R
+    // 备注：  先拆分 result_31 为 4 个 32-bit 字，再反序拼接
     assign { word_0, word_1, word_2, word_3} = result_31;
     assign reversed_result_31 = {word_3, word_2, word_1, word_0};
     
+    // 备注：流水线寄存器链（31 级 + 输出寄存器）
+    // 备注：  reg_result_00 ~ reg_result_30: 31 个流水线切割寄存器
+    // 备注：    每级寄存 one_round_for_encdec 的组合输出
+    // 备注：    下一拍作为下一轮的输入
+    // 备注：  result_out: 最终输出寄存器，保存反序后的密文
+    // 备注：  作用: 切断组合逻辑路径，形成 32 级流水线
     always@(posedge clk or negedge reset_n) if(!reset_n) reg_result_00 <= 128'h0; else reg_result_00 <= result_00;
     always@(posedge clk or negedge reset_n) if(!reset_n) reg_result_01 <= 128'h0; else reg_result_01 <= result_01;
     always@(posedge clk or negedge reset_n) if(!reset_n) reg_result_02 <= 128'h0; else reg_result_02 <= result_02;

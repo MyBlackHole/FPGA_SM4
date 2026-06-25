@@ -27,6 +27,26 @@
 //   one_round_for_encdec.v, sbox_replace.v, transform_for_encdec.v
 //
 //////////////////////////////////////////////////////////////////////////////////
+// 备注：SM4 加密/解密引擎 — 串行迭代架构
+// 备注：
+// 备注：设计目标：在 Tang Nano 20K (GW2AR) 上最小化 LUT 资源占用。
+// 备注：与全流水线架构的对比：
+// 备注：  全流水线: 32 个 one_round_for_encdec 实例，每时钟输出一个结果
+// 备注：  串行迭代: 1 个 one_round_for_encdec 实例复用 32 次，
+// 备注：            33 个时钟输出一个结果
+// 备注：
+// 备注：面积节省: 轮函数逻辑约为全流水线的 1/32
+// 备注：代价: 吞吐率降为流水线的 1/33，延后 32 拍输出
+// 备注：
+// 备注：接口与 sm4_encdec.v (流水线版) 完全兼容，可即插即用替换。
+// 备注：外围模块 (key_expansion 等) 无需做任何修改。
+// 备注：
+// 备注：FSM 工作流程：
+// 备注：  IDLE → WAITING_FOR_KEY → ENCRYPTION
+// 备注：  等待密钥扩展完成后开始加密，加密状态保持直到被禁用。
+// 备注：
+// 备注：迭代控制器核心寄存器：busy, round, reg_data (详见下方)
+// 备注：
 
 module sm4_encdec_serial(
     clk                 ,
@@ -116,6 +136,15 @@ module sm4_encdec_serial(
     //-----------------------------------------------------------------
     // FSM states (same encoding as original)
     //-----------------------------------------------------------------
+    // 备注：状态编码：
+    // 备注：  IDLE (00) — 空闲，等待 sm4_enable_in & encdec_enable_in
+    // 备注：  WAITING_FOR_KEY (01) — 等待 key expansion 完成
+    // 备注：  ENCRYPTION (10) — 迭代计算中，连续处理到来的 128-bit 块
+    // 备注：
+    // 备注：注意 WAITING_FOR_KEY 仅在密钥未就绪时停留，
+    // 备注：key_exp_ready_in 为高后下一拍跳转到 ENCRYPTION。
+    // 备注：ENCRYPTION 状态不因 block 处理完成而退出，
+    // 备注：它是"持续工作"模式，直到外部禁用 encdec_enable_in。
     localparam IDLE            = 2'b00;
     localparam WAITING_FOR_KEY = 2'b01;
     localparam ENCRYPTION      = 2'b10;
@@ -189,6 +218,24 @@ module sm4_encdec_serial(
     //                        ready_out <= 1, busy <= 0
     //   Total: ~33 cycles from valid_in to ready_out
     //-----------------------------------------------------------------
+    // 备注：迭代控制核心寄存器说明：
+    // 备注：
+    // 备注：  busy — 忙标志，=1 表示正在处理一个 block，阻止新数据加载
+    // 备注：  round[4:0] — 当前轮号 (0..31)，决定本轮使用哪个轮密钥，
+    // 备注：              也作为迭代是否完成的判断 (round==31 时输出)
+    // 备注：  reg_data — 128 位中间状态寄存器，每轮被 round_result 更新
+    // 备注：
+    // 备注：迭代周期（ENCRYPTION 状态下）：
+    // 备注：  T=0   valid_in=1 → 加载 data_in, busy=1, round=0
+    // 备注：  T=1   计算 round 0, reg_data ← round_result, round=1
+    // 备注：  T=2   计算 round 1, reg_data ← round_result, round=2
+    // 备注：  ...    ...
+    // 备注：  T=32  计算 round 31, 输出反序结果, ready_out=1, busy=0
+    // 备注：
+    // 备注：总延迟 33 拍，期间可连续输入新 block（需要前一个 busy=0）。
+    // 备注：但由于串行迭代的流水线间隙，每 33 拍处理一个 block，
+    // 备注：不能像全流水线那样每拍输入一个。
+    // 备注：
     reg        busy;
     reg  [4:0] round;      // 0..31
     reg [127:0] reg_data;  // current block data
@@ -198,6 +245,8 @@ module sm4_encdec_serial(
 
     // Selected round key (combinational MUX)
     reg [31:0] selected_rk;
+    // 备注：selected_rk — 由 round 号从 32 个预计算轮密钥中选出一个，
+    // 备注：组合逻辑 MUX 输出，不占用时钟周期。
 
     // ready_out (registered, auto-clears on next clock)
     reg ready_reg;
@@ -206,6 +255,8 @@ module sm4_encdec_serial(
     // result_out (registered)
     reg [127:0] result_reg;
     assign result_out = result_reg;
+    // 备注：result_out 与 ready_out 同步输出，ready_out 高电平时
+    // 备注：result_out 的数据有效。
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -236,6 +287,11 @@ module sm4_encdec_serial(
                         // round == 31: last round computation
                         // round_result is the final SM4 result
                         // Reverse word order for output (SM4 convention)
+                        // 备注：SM4 反序变换 (Reverse Transform)
+                        // 备注：SM4 算法规定输出时需将 (X0, X1, X2, X3) 反序排列为 (X3, X2, X1, X0)。
+                        // 备注：此处将 round_result 的四个 32-bit 字 (X3|X2|X1|X0) 重排为 (X0|X1|X2|X3) 输出。
+                        // 备注：拼接域格式：{X0, X1, X2, X3}，其中 X0 在 [127:96] 位。
+                        // 备注：反序后结果需与标准 SM4 测试向量一致。
                         $display("[%0t] encdec: RESULT ready (round=%d)", $time, round);
                         result_reg <= {round_result[31:0],
                                        round_result[63:32],
@@ -262,6 +318,11 @@ module sm4_encdec_serial(
     // ...
     // round=31 → rk_31_in  (round 31)
     //-----------------------------------------------------------------
+    // 备注：32:1 轮密钥多路选择器
+    // 备注：32 个预计算轮密钥由外部 key_expansion 模块提供。
+    // 备注：注意这里不关心加密/解密模式，因为加密和解密使用的轮密钥序列
+    // 备注：不同（解密时轮密钥反序使用），但此选择器仅按 round 号选取，
+    // 备注：反序工作由外围模块或者轮密钥输入顺序保证。
     always @(*) begin
         case (round)
             5'd0:   selected_rk = rk_00_in;
@@ -303,6 +364,22 @@ module sm4_encdec_serial(
     //-----------------------------------------------------------------
     // Single round function instance (shared across all 32 iterations)
     //-----------------------------------------------------------------
+    // 备注：单轮函数实例化（被所有 32 轮迭代共享）
+    // 备注：
+    // 备注：这是串行迭代架构的核心——面积节省的关键。
+    // 备注：全流水线版实例化 32 个 u_round，每个占用一套 S-Box + 线性变换逻辑。
+    // 备注：本设计只实例化 1 个，通过 MUX 每周期切换输入 (reg_data, selected_rk)，
+    // 备注：并在时序上重复使用 32 次。
+    // 备注：
+    // 备注：组合逻辑路径：
+    // 备注：  reg_data[127:0] + selected_rk[31:0]
+    // 备注：    → S-Box 替换 (4 个并行 S-Box)
+    // 备注：      → 线性变换 L
+    // 备注：        → 与 reg_data 高位异或
+    // 备注：          → round_result[127:0]
+    // 备注：
+    // 备注：这种单实例共享方式延后了 32 拍输出结果，
+    // 备注：但在资源受限的 FPGA（如 Tang Nano 20K）上至关重要。
     one_round_for_encdec u_round (
         .data_in      (reg_data),
         .round_key_in (selected_rk),
