@@ -15,6 +15,26 @@
 //    'E' + 16 plaintext      Encrypt, returns 16 ciphertext bytes
 //    'D' + 16 ciphertext     Decrypt, returns 16 plaintext bytes
 ////////////////////////////////////////////////////////////////////////////////
+// 备注：SM4 UART 级测试激励 — 双重验证策略
+// 备注：
+// 备注：┌─────────────────────────────────────────────────────────────────┐
+// 备注：│                    测试流程总览                                    │
+// 备注：│   PING(0x50) → SET_KEY(0x4B) → ENCRYPT(0x45) → DECRYPT(0x44)   │
+// 备注：└─────────────────────────────────────────────────────────────────┘
+// 备注：
+// 备注：[路径 A - 内部信号验证]
+// 备注：  直接观察 sm4_result_out / sm4_ready_out
+// 备注：  在 SM4 内核完成运算后即时比对结果
+// 备注：  优点：不依赖 UART 收发，可独立验证内核正确性
+// 备注：
+// 备注：[路径 B - UART TX 验证]
+// 备注：  通过硬件嗅探器自动捕获 FPGA 发出的串口字节
+// 备注：  将捕获的字节流与预期值逐字节比对
+// 备注：  优点：覆盖 UART 收发通路完整性
+// 备注：
+// 备注：两条路径独立验证，任一失败都能定位问题来源
+// 备注：
+////////////////////////////////////////////////////////////////////////////////
 
 module tb_sm4_uart;
 
@@ -27,6 +47,8 @@ module tb_sm4_uart;
     localparam integer BAUD_RATE  = 115200;
     localparam integer BIT_CYCLES = CLK_FREQ / BAUD_RATE;           // 234
     localparam real    BIT_TIME_NS = (CLK_NS * CLK_FREQ) / BAUD_RATE; // 8680.55
+    // 备注：BIT_CYCLES = 27MHz / 115200 ≈ 234 个时钟周期/bit
+    // 备注：BIT_TIME_NS ≈ 8680.55 ns/bit — 即每 bit 持续约 8.68 µs
 
     // Debug: verify timing params
     // initial block with param debug removed (moved to main seq)
@@ -61,6 +83,14 @@ module tb_sm4_uart;
         .sm4_ready_out(sm4_ready_out)
     );
 
+    // 备注：sm4_done 锁存器 — 将单周期脉冲展宽为电平信号
+    // 备注：
+    // 备注：sm4_ready_out 是 SM4 内核输出的单周期脉冲，宽度仅 1 个时钟周期。
+    // 备注：如果用 @(posedge sm4_ready_out) 触发，在脉冲到达时 testbench
+    // 备注：可能还在发送数据字节（SM4 计算仅需 ~2.5µs，而 16 字节 UART 发送
+    // 备注：需 ~16×10×8.68µs ≈ 1.39ms），会错过脉冲边沿。
+    // 备注：因此用锁存器将脉冲展宽为电平信号 sm4_done，testbench 通过 wait()
+    // 备注：等待该电平，不受脉冲宽度影响。
     // Latch sm4_ready_out (it's a single-cycle pulse)
     reg sm4_done;
     always @(posedge clk or negedge reset_n) begin
@@ -74,6 +104,21 @@ module tb_sm4_uart;
     initial clk = 0;
     always #(CLK_NS / 2.0) clk = ~clk;
 
+    // 备注：UART TX 硬件嗅探器 — 自动捕获 FPGA 发出的串口数据
+    // 备注：
+    // 备注：工作原理：
+    // 备注：  1. 空闲时 (tx=高电平) 将 cap_armed 置 1，准备检测起始位
+    // 备注：  2. 检测到 tx 下降沿 (起始位) → 跳转到中间位置开始采样
+    // 备注：  3. 每个数据位在中间位置采样 (BIT_CYCLES 计时器控制)
+    // 备注：  4. 采集完 8 个数据位后存入环形缓冲区 cap_buf[cap_wr]
+    // 备注：  5. cap_wr 递增，testbench 通过差值判断捕获字节数
+    // 备注：
+    // 备注：环形缓冲区设计 (Ring Buffer)：
+    // 备注：  - 256 字节深度 (cap_buf[0:255])，cap_wr 为写指针
+    // 备注：  - testbench 在发送前记录 prev_wr = cap_wr (快照当前写指针)
+    // 备注：  - 发送完成后 n = cap_wr - prev_wr 即为新捕获的字节数
+    // 备注：  - 通过 cap_buf[prev_wr + i] 索引访问具体捕获字节
+    // 备注：  - 256 字节足够大 (最大一次传输仅 16 字节)，不会溢出
     // ── UART TX capture (autonomous hardware sniffer) ───────────────────────
     // Continuously watches the tx pin and samples UART frames at mid-bit
     // positions using clock-synchronous timing.  Stores bytes in a ring
@@ -99,6 +144,14 @@ module tb_sm4_uart;
                 // Start bit detected → skip straight to mid-bit-0
                 // (1.5 bit times from the rising edge that armed us,
                 //  minus 1 because the counter decrements on the next cycle)
+                // 备注：中间采样的数学推导：
+                // 备注：从检测到起始位下降沿的时钟上升沿开始计算：
+                // 备注：  跳过量 = BIT_CYCLES (起始位全宽)
+                // 备注：         + BIT_CYCLES/2 (半个数据位，到 bit-0 中间)
+                // 备注：         - 1 (计数器在下一周期会再减 1)
+                // 备注：         = 234 + 117 - 1 = 350
+                // 备注：之后每次采样间隔 BIT_CYCLES - 1 = 233，
+                // 备注：恰好落在下一位的中间位置
                 cap_busy  <= 1'b1;
                 cap_cnt   <= (BIT_CYCLES * 3) / 2 - 1;  // 350 → mid-bit-0
                 cap_bit   <= 3'd0;
@@ -125,6 +178,19 @@ module tb_sm4_uart;
         end
     end
 
+    // 备注：UART 发送任务 — 驱动 FPGA 的 rx 引脚
+    // 备注：
+    // 备注：UART 帧格式 (8N1) 时序：
+    // 备注：  ┌──────┬──────┬──────┬───────┬──────┐
+    // 备注：  │起始位 │ bit-0 │ bit-1 │ … │ bit-7 │ 停止位 │
+    // 备注：  │  0   │ LSB  │  …   │  …  │ MSB  │   1   │
+    // 备注：  └──────┴──────┴──────┴───────┴──────┘
+    // 备注：  每段持续 BIT_TIME_NS ≈ 8.68 µs
+    // 备注：  每字节总时间 = 10 × 8.68 µs = 86.8 µs
+    // 备注：  16 字节传输 ≈ 16 × 86.8 µs ≈ 1.39 ms
+    // 备注：
+    // 备注：每次 #(BIT_TIME_NS) 延时使用实际时间值 (ns)，
+    // 备注：而非时钟周期计数。这样时序更精确。
     // ── UART Transmit (drives rx pin toward the FPGA) ───────────────────────
     task uart_send(input [7:0] byte_data);
         integer i;
@@ -146,6 +212,16 @@ module tb_sm4_uart;
         end
     endtask
 
+    // 备注：主测试序列 — 依次执行 PING / SET_KEY / ENCRYPT / DECRYPT
+    // 备注：
+    // 备注：测试流程：
+    // 备注：  PING ──→ SET_KEY ──→ ENCRYPT ──→ DECRYPT ──→ ALL PASS
+    // 备注：    │          │            │            │
+    // 备注：    │ 验证 'O' │ 设置密钥   │ 验证密文   │ 验证明文
+    // 备注：    │          │            ├─ sm4 内核  ├─ sm4 内核
+    // 备注：    │          │            └─ TX 字节   └─ TX 字节
+    // 备注：
+    // 备注：图例：─→ 表示测试顺序，每步必须通过才能继续
     // ── Test sequence ───────────────────────────────────────────────────────
     initial begin
         reg [7:0] n;
@@ -171,6 +247,12 @@ module tb_sm4_uart;
         // Note: $time counts in 0.1ns units (timescale precision).
         // So $time values appear 10x larger than the actual ns time.
 
+        // 备注：==============================
+        // 备注：[测试 1] PING — 验证 FPGA 基本通信通路
+        // 备注：  发送 ASCII 'P' (0x50)
+        // 备注：  预期 FPGA 返回 ASCII 'O' (0x4F)
+        // 备注：  失败意味着 UART 链路或 FPGA 启动异常
+        // 备注：==============================
         // ═══════════════════════════════════════════════════════════════════
         // [1] PING test
         // ═══════════════════════════════════════════════════════════════════
@@ -191,6 +273,14 @@ module tb_sm4_uart;
             $display("  PING PASS: got 'O' (0x4F)");
         end
 
+        // 备注：==============================
+        // 备注：[测试 2] SET_KEY — 设置 SM4 加密密钥
+        // 备注：  发送 ASCII 'K' (0x4B) 作为命令字
+        // 备注：  随后发送 16 字节密钥 (MSB 优先)
+        // 备注：  密钥固定为标准测试向量：
+        // 备注：    KEY = 01234567 89abcdef fedcba98 76543210
+        // 备注：  此步骤无 UART TX 返回，等待 20 周期后继续
+        // 备注：==============================
         // ═══════════════════════════════════════════════════════════════════
         // [2] SET_KEY
         // ═══════════════════════════════════════════════════════════════════
@@ -203,6 +293,19 @@ module tb_sm4_uart;
         #(CLK_NS * 20);
         $display("  Key set complete @ %0t", $time);
 
+        // 备注：==============================
+        // 备注：[测试 3] ENCRYPT — 加密测试
+        // 备注：  发送 ASCII 'E' (0x45) 作为命令字
+        // 备注：  随后发送 16 字节明文 (MSB 优先)
+        // 备注：  验证策略：
+        // 备注：  [路径 A] SM4 内核输出 sm4_result_out 应等于 EXPECTED_CIPHER
+        // 备注：  [路径 B] UART TX 捕获的 16 字节与预期密文逐字节比对
+        // 备注：
+        // 备注：  时序注意：sm4_ready_out 是单周期脉冲，SM4 计算仅需 ~2.5µs，
+        // 备注：  而 16 字节 UART 发送需 ~1.39ms — 即 SM4 在发送期间就已经算完。
+        // 备注：  因此不能用 @(posedge sm4_ready_out) 捕获完成事件，
+        // 备注：  必须使用锁存后的 sm4_done 电平信号 (wait(sm4_done))。
+        // 备注：==============================
         // ═══════════════════════════════════════════════════════════════════
         // [3] ENCRYPT
         // ═══════════════════════════════════════════════════════════════════
@@ -255,11 +358,24 @@ module tb_sm4_uart;
             $display("  ENCRYPT TX PASS: all 16 bytes match \xE2\x9C\x93");
         end
 
+        // 备注：==============================
+        // 备注：[测试 4] DECRYPT — 解密测试
+        // 备注：  发送 ASCII 'D' (0x44) 作为命令字
+        // 备注：  随后发送 16 字节密文 (MSB 优先)
+        // 备注：  验证策略：
+        // 备注：  [路径 A] SM4 内核输出 sm4_result_out 应等于 PLAIN
+        // 备注：  [路径 B] UART TX 捕获的 16 字节与预期明文逐字节比对
+        // 备注：
+        // 备注：  注意：每次测试前手动复位 sm4_done = 0，
+        // 备注：  否则上次测试残留的高电平会导致 wait(sm4_done) 立即返回
+        // 备注：==============================
         // ═══════════════════════════════════════════════════════════════════
         // [4] DECRYPT
         // ═══════════════════════════════════════════════════════════════════
         $display("\n[4] DECRYPT:");
         prev_wr = cap_wr;
+        // 备注：复位 sm4_done — 清除上次加密残留的高电平信号
+        // 备注：否则 wait(sm4_done) 会立即返回，不会等待本次解密完成
         // Reset sm4_done before triggering new SM4 operation
         sm4_done = 1'b0;
         uart_send(8'h44);  // 'D'
@@ -315,6 +431,17 @@ module tb_sm4_uart;
         $dumpvars(0, tb_sm4_uart);
     end
 
+    // 备注：超时看门狗 — 防止仿真无限挂起
+    // 备注：
+    // 备注：如果 SM4 内核或 UART 通信异常导致 testbench 永远阻塞
+    // 备注：在某个等待点（如 wait(led_busy)、wait(sm4_done)），
+    // 备注：此看门狗会在 800,000 个时钟周期后强制退出仿真并报告超时。
+    // 备注：
+    // 备注：超时时间 = 800,000 × 37.037 ns ≈ 29.63 ms
+    // 备注：在正常条件下，全部四项测试应在远小于此时间内完成。
+    // 备注：
+    // 备注：由于此 initial 块与主测试序列并行执行，
+    // 备注：一旦触发 $finish，整个仿真立即终止。
     // ── Timeout watchdog ─────────────────────────────────────────────────────
     initial begin
         #(CLK_NS * 800000);
