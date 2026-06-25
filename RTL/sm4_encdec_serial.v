@@ -123,6 +123,30 @@ module sm4_encdec_serial(
     reg [1:0] current;
     reg [1:0] next_state;
 
+    reg [63:0] enc_state_name;
+    always @(*) begin
+        case (current)
+            IDLE:            enc_state_name = "IDLE";
+            WAITING_FOR_KEY: enc_state_name = "WAIT_KEY";
+            ENCRYPTION:      enc_state_name = "ENCRYPT";
+            default:         enc_state_name = "?";
+        endcase
+    end
+
+    reg [1:0] enc_current_d;
+    reg [63:0] enc_state_d;
+    always @(posedge clk) begin
+        enc_current_d <= current;
+        enc_state_d   <= enc_state_name;
+    end
+
+    always @(posedge clk) begin
+        if (current != enc_current_d && $time > 100)
+            $display("[%0t] encdec: %s -> %s (key_exp_rdy=%b, sm4_en=%b, encdec_en=%b, valid=%b)",
+                     $time, enc_state_d, enc_state_name,
+                     key_exp_ready_in, sm4_enable_in, encdec_enable_in, valid_in);
+    end
+
     always @(posedge clk or negedge reset_n)
         if(!reset_n)
             current <= IDLE;
@@ -198,6 +222,8 @@ module sm4_encdec_serial(
             if (current == ENCRYPTION) begin
                 if (valid_in && !busy) begin
                     // Load initial data, begin processing
+                    $display("[%0t] encdec: LOAD valid_in=%b busy=%b data=%032h",
+                             $time, valid_in, busy, data_in);
                     reg_data <= data_in;
                     busy     <= 1'b1;
                     round    <= 5'd0;
@@ -210,6 +236,7 @@ module sm4_encdec_serial(
                         // round == 31: last round computation
                         // round_result is the final SM4 result
                         // Reverse word order for output (SM4 convention)
+                        $display("[%0t] encdec: RESULT ready (round=%d)", $time, round);
                         result_reg <= {round_result[31:0],
                                        round_result[63:32],
                                        round_result[95:64],

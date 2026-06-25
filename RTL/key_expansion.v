@@ -138,6 +138,15 @@ end
 `define IDLE          2'b00
 `define KEY_EXPANSION 2'b01
 
+reg [63:0] ke_state_name;
+always @(*) begin
+    case (current)
+        `IDLE:          ke_state_name = "IDLE";
+        `KEY_EXPANSION: ke_state_name = "KEY_EXP";
+        default:        ke_state_name = "?";
+    endcase
+end
+
 always@(posedge clk or negedge reset_n)
 if(!reset_n)
 	current	<=	`IDLE;
@@ -186,13 +195,28 @@ begin
 end
 
     
+reg ke_was_key_exp;
+always @(posedge clk) begin
+    ke_was_key_exp <= (current == `KEY_EXPANSION);
+end
+
 always@(posedge clk or negedge reset_n)
 if(!reset_n)
 	key_exp_finished_out <=	1'd0;
-else if(~sm4_enable_in || ~enable_key_exp_in && reg_enable_key_exp)    
+else if(~sm4_enable_in || ~enable_key_exp_in && reg_enable_key_exp)
     key_exp_finished_out <=	1'd0;
-else if(current == `KEY_EXPANSION && next == `IDLE)
+else if(current == `KEY_EXPANSION && next == `IDLE) begin
 	key_exp_finished_out <=	1'b1;
+	$display("[%0t] key_exp: FINISHED (cnt=%d, reg_cnt=%d)", $time, count_round, reg_count_round);
+end
+
+// Debug: print on KEY_EXPANSION entry and finish
+always @(posedge clk) begin
+    if (current == `KEY_EXPANSION && !ke_was_key_exp)
+        $display("[%0t] key_exp: ENTERED (en_key_exp=%b reg_ukv=%b ukv=%b cnt=%d rcnt=%d)",
+                 $time, enable_key_exp_in, reg_user_key_valid, user_key_valid_in,
+                 count_round, reg_count_round);
+end
 
 always@(posedge clk or negedge reset_n)
 if(!reset_n)

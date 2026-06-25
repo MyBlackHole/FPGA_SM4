@@ -1,0 +1,25 @@
+// Tang Nano 20K UART SM4 Pin Constraints
+// UART via BL616 USB-UART bridge (FT2232 emulation)
+// Reference: Sipeed Tang Nano 20K schematic v2.0
+
+// Clock: 27MHz onboard crystal
+IO_LOC  "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33;
+
+// Reset: S2 Button (active low)
+IO_LOC  "reset_n" 87;   // PIN87_MODE1_KEY2
+IO_PORT "reset_n" IO_TYPE=LVCMOS33;
+
+// UART TX: FPGA transmits → BL616 RX → USB to PC
+// Pin 69 is IOT50A, connected to BL616 UART_RX
+IO_LOC  "tx" 69;
+IO_PORT "tx" IO_TYPE=LVCMOS33;
+
+// UART RX: FPGA receives ← BL616 TX ← USB from PC
+// Pin 70 is IOT44B, connected to BL616 UART_TX
+IO_LOC  "rx" 70;
+IO_PORT "rx" IO_TYPE=LVCMOS33;
+
+// LED Busy indicator (active low - on LED0)
+IO_LOC  "led_busy" 15;  // PIN15_SYS_LED0
+IO_PORT "led_busy" IO_TYPE=LVCMOS33 PULL_MODE=UP;
