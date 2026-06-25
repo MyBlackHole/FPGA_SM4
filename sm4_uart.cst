@@ -6,8 +6,8 @@
 IO_LOC  "clk" 4;
 IO_PORT "clk" IO_TYPE=LVCMOS33;
 
-// Reset: S2 Button (active low)
-IO_LOC  "reset_n" 87;   // PIN87_MODE1_KEY2
+// Reset: using pin 88 (same as Sipeed UART example - active-high, no pull)
+IO_LOC  "reset_n" 88;
 IO_PORT "reset_n" IO_TYPE=LVCMOS33;
 
 // UART TX: FPGA transmits → BL616 RX → USB to PC
