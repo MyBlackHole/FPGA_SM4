@@ -67,6 +67,7 @@ module sm4_uart_top #(
         .enable_key_exp_in  (enable_key_exp_in),
         .user_key_valid_in  (user_key_valid_in),
         .user_key_in        (user_key),
+        .key_cached_in      (key_cached),
         .key_exp_ready_out  (key_exp_ready_out),
         .ready_out          (ready_out),
         .result_out         (result)
@@ -78,6 +79,13 @@ module sm4_uart_top #(
     reg [3:0] byte_cnt;
 
     reg [4:0] tx_done_count;
+
+    // ── Key expansion cache ────────────────────────────────────────────────
+    // When key_cached=1, skip KEY_EXPAND→WAIT_KEY on E/D commands.
+    // The key_expansion module retains its round key registers, so we
+    // just need sm4_encdec_serial to see key_exp_ready=1 immediately.
+    reg key_cached;
+    wire key_ready = key_exp_ready_out || key_cached;
 
     // ── FSM ─────────────────────────────────────────────────────────────────
     localparam IDLE       = 5'd0;
@@ -173,6 +181,7 @@ module sm4_uart_top #(
             send_pulse        <= 1'b0;
             tx_busy_d         <= 1'b0;
             tx_done_count     <= 5'd0;
+            key_cached        <= 1'b0;
         end else begin
             tx_busy_d  <= tx_busy;
             send_pulse <= 1'b0;
@@ -191,8 +200,9 @@ module sm4_uart_top #(
 
                     if (rx_received) begin
                         if (cmd_is_set_key) begin
-                            byte_cnt <= 4'd0;
-                            state    <= RX_KEY;
+                            byte_cnt   <= 4'd0;
+                            key_cached <= 1'b0;  // new key → must re-expand
+                            state      <= RX_KEY;
                         end else if (cmd_is_encrypt) begin
                             encdec_sel_in <= 1'b0;  // encrypt mode
                             byte_cnt      <= 4'd0;
@@ -225,16 +235,23 @@ module sm4_uart_top #(
                     if (rx_received) begin
                         result_buf[byte_cnt] <= rx_data;
                         if (byte_cnt == 4'd15) begin
-                            // All 16 bytes received — start key expansion
-                            // (the serial engine needs key_exp_ready before
-                            //  it can accept valid_in)
-                            $display("[%0t] RX_DATA: last byte, triggering SM4 (enable=%b key=%b)",
-                                     $time, sm4_enable_in, enable_key_exp_in);
-                            sm4_enable_in     <= 1'b1;
-                            encdec_enable_in  <= 1'b1;
-                            enable_key_exp_in <= 1'b1;
-                            user_key_valid_in <= 1'b1;
-                            state             <= KEY_EXPAND;
+                            $display("[%0t] RX_DATA: last byte, key_cached=%b", $time, key_cached);
+                            sm4_enable_in    <= 1'b1;
+                            encdec_enable_in <= 1'b1;
+
+                            if (key_cached) begin
+                                // Key already expanded — skip KEY_EXPAND/WAIT_KEY.
+                                // key_ready=1 (from key_cached), so sm4_encdec_serial
+                                // will immediately transition WAITING_FOR_KEY→ENCRYPTION.
+                                // Pulse valid_in directly.
+                                valid_in <= 1'b1;
+                                state    <= DO_START;
+                            end else begin
+                                // First time: run key expansion
+                                enable_key_exp_in <= 1'b1;
+                                user_key_valid_in <= 1'b1;
+                                state             <= KEY_EXPAND;
+                            end
                         end
                         byte_cnt <= byte_cnt + 1;
                     end
@@ -242,8 +259,6 @@ module sm4_uart_top #(
 
                 // ═════════════════════════════════════════════════════════
                 KEY_EXPAND: begin
-                    // user_key_valid_in was 1 for one cycle (pulse done)
-                    // Hold enable_key_exp_in so key expansion runs to completion
                     $display("[%0t] KEY_EXPAND", $time);
                     sm4_enable_in     <= 1'b1;
                     encdec_enable_in  <= 1'b1;
@@ -259,11 +274,9 @@ module sm4_uart_top #(
 
                     if (key_exp_ready_out) begin
                         $display("[%0t] WAIT_KEY: key_exp_ready_out ASSERTED", $time);
-                        // Key expansion done, serial engine transitions
-                        // from WAITING_FOR_KEY → ENCRYPTION.
-                        // Now we can start the data operation.
-                        valid_in <= 1'b1;
-                        state    <= DO_START;
+                        key_cached <= 1'b1;  // key is now expanded and cached
+                        valid_in   <= 1'b1;
+                        state      <= DO_START;
                     end
                 end
 

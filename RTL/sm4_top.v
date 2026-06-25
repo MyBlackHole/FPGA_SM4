@@ -29,6 +29,7 @@ module sm4_top(
     enable_key_exp_in   ,
     user_key_valid_in   ,
     user_key_in         ,
+    key_cached_in       ,
     key_exp_ready_out   ,
     ready_out           ,
     result_out         
@@ -44,6 +45,7 @@ module sm4_top(
     input            enable_key_exp_in  ;
     input            user_key_valid_in  ;
     input   [127: 0] user_key_in        ;
+    input            key_cached_in      ;  // 1=skip key expansion, use cached keys
     output           ready_out          ;
     output  [127: 0] result_out         ;
     
@@ -81,12 +83,15 @@ module sm4_top(
     wire    [31 : 0] rk_30              ;
     wire    [31 : 0] rk_31              ;
     
+    // key_ready: when key is cached, encdec serial sees ready=1 immediately
+    wire key_ready = key_exp_ready_out || key_cached_in;
+
     sm4_encdec_serial u_encdec (
         .clk                    (clk                 ),
         .reset_n                (reset_n             ),
         .sm4_enable_in          (sm4_enable_in       ),
         .encdec_enable_in       (encdec_enable_in    ),
-        .key_exp_ready_in       (key_exp_ready_out   ),
+        .key_exp_ready_in       (key_ready           ),
         .valid_in               (valid_in            ),
         .data_in                (data_in             ),
         .rk_00_in               (rk_00               ),
