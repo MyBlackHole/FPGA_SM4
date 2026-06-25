@@ -18,6 +18,17 @@
 // Additional Comments:
 // 
 //////////////////////////////////////////////////////////////////////////////////
+// 备注：SM4 密钥扩展算法流程：
+// 备注：┌───────────────────────────────────────────────────────────────────────┐
+// 备注：│ 1. 输入 128-bit 用户密钥 MK = (MK0, MK1, MK2, MK3)                   │
+// 备注：│ 2. 与系统参数 FK 异或: (K0,K1,K2,K3) = MK ^ FK                       │
+// 备注：│ 3. 对 i=0..31 迭代计算:                                              │
+// 备注：│    rk_i = K_{i+4} = K_i ^ T'(K_{i+1}^K_{i+2}^K_{i+3}^CK_i)          │
+// 备注：│ 4. 输出 32 个 32-bit 轮密钥 rk_00 ~ rk_31                            │
+// 备注：└───────────────────────────────────────────────────────────────────────┘
+// 备注：图例：T' = 非线性变换τ(S盒) + 线性变换L'
+// 备注：      FK = 系统参数常量 (FK0~FK3)
+// 备注：      CK_i = 轮常量，每轮不同
 module key_expansion
 	(
         clk					,
@@ -135,6 +146,9 @@ begin
 end
 
     
+// 备注：FSM 状态定义
+// 备注：IDLE — 空闲态，等待密钥扩展使能
+// 备注：KEY_EXPANSION — 密钥扩展态，迭代 32 轮计算轮密钥
 `define IDLE          2'b00
 `define KEY_EXPANSION 2'b01
 
@@ -155,6 +169,8 @@ else if(sm4_enable_in)
 else
 	current	<=	`IDLE;
 
+// 备注：状态转移逻辑 — 进入密钥扩展的条件
+// 备注：IDLE下 enable_key_exp_in 有效且用户密钥缓存完成时跳转
 always@(*) 
 begin
 	next = `IDLE;
@@ -177,6 +193,7 @@ begin
 end
 
 
+// 备注：轮计数器 count_round — 每轮递增，0~31 共 32 轮
 always@(posedge clk or negedge reset_n)
 if(!reset_n)
 	count_round	<=	5'd0;
@@ -226,6 +243,7 @@ else if(~reg_user_key_valid && user_key_valid_in)
 	
 	
 
+// 备注：每轮输入数据选择 — round 0 使用用户密钥，后续轮使用上一轮计算结果
 assign	data_for_round = reg_count_round != 5'd0 ?	reg_data_after_round : reg_user_key; 
 
 
@@ -253,8 +271,13 @@ else if(current == `KEY_EXPANSION)
 	reg_data_after_round <=	data_after_round;
 
     
+// 备注：encdec_sel_in 控制轮密钥顺序：
+// 备注：加密(encdec_sel_in=0): 直接顺序 rk_00~rk_31
+// 备注：解密(encdec_sel_in=1): 逆序 rk_31~rk_00 (31 - reg_count_round)
 assign count_for_reg = encdec_sel_in == 1'b0 ? reg_count_round : 5'b1_1111 -  reg_count_round;   
     
+// 备注：每个时钟周期捕获一个轮密钥到对应 rk 寄存器
+// 备注：count_for_reg 值决定当前结果写入哪个 rk 寄存器
 always@(posedge clk or negedge reset_n)
 begin
 if(!reset_n) begin
