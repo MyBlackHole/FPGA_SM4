@@ -18,6 +18,14 @@
 // Additional Comments:
 // 
 //////////////////////////////////////////////////////////////////////////////////
+// 备注：SM4 密钥扩展线性变换 L'
+// 备注：
+// 备注：与加密/解密用的 L 变换不同，L' 用于密钥扩展
+// 备注：  L:  C = B ^ (B<<<2) ^ (B<<<10) ^ (B<<<18) ^ (B<<<24)
+// 备注：  L': C = B ^ (B<<<13) ^ (B<<<23)
+// 备注：
+// 备注：L' 的移位量(13, 23)比 L 的移位量(2,10,18,24)更少、更大，
+// 备注：这是 SM4 算法设计者的故意选择，提供足够的扩散同时减少硬件开销
 module transform_for_key_exp
 	(
 		data_in,
@@ -47,6 +55,8 @@ assign	word_replaced	=	{	byte_0_replaced,
 								byte_2_replaced,
 								byte_3_replaced};
 
+// 备注：4字节分别查 S 盒 —— SM4 非线性变换 τ
+// 备注：将 32-bit 输入分成 4 字节，每个字节通过 S 盒替换
 sbox_replace u_0
 	(
 		.data_in(byte_0),
@@ -71,6 +81,9 @@ sbox_replace	u_3
 		.result_out(byte_3_replaced)														
 	);																																				
 
+// 备注：线性变换 L' = B ^ (B<<<13) ^ (B<<<23)
+// 备注：通过 {word_replaced[18:0], word_replaced[31:19]} 实现循环左移 13 位
+// 备注：通过 {word_replaced[8:0], word_replaced[31:9]}  实现循环左移 23 位
 assign	data_after_linear_key_out	= (word_replaced ^ {word_replaced[18:0], word_replaced[31:19]}) 
 					^ {word_replaced[8:0], word_replaced[31:9]};
 
