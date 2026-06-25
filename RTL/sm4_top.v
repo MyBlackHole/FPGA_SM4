@@ -83,10 +83,9 @@ module sm4_top(
     wire    [31 : 0] rk_30              ;
     wire    [31 : 0] rk_31              ;
     
-    // key_ready: when key is cached, encdec serial sees ready=1 immediately
     wire key_ready = key_exp_ready_out || key_cached_in;
 
-    sm4_encdec_serial u_encdec (
+    sm4_encdec_4round u_encdec (
         .clk                    (clk                 ),
         .reset_n                (reset_n             ),
         .sm4_enable_in          (sm4_enable_in       ),
